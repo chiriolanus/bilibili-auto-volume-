@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         哔哩哔哩自动音量
 // @namespace    https://github.com/chiriolanus/bilibili-auto-volume-
-// @version      1.0.1
+// @version      1.0.2
 // @license      GPL-3.0
 // @description  为哔哩哔哩直播间按房间单独记忆音量，并在进入直播间时自动应用对应音量或默认音量。
 // @author       权哥本人（Chriolanus）
@@ -35,6 +35,7 @@
 	let routeObserver = null;
 	let lastAppliedRoomId = null;
 	let lastAppliedVolume = null;
+	let keepAliveTimer = null;
 	let audioContext = null;
 	const videoAudioMap = new WeakMap();
 
@@ -376,7 +377,43 @@
 	}
 
 	function getVideoElements() {
-		return Array.from(document.querySelectorAll("video"));
+		const videos = [];
+		const seen = new Set();
+		const roots = [document];
+
+		while (roots.length > 0) {
+			const root = roots.pop();
+			if (!root || typeof root.querySelectorAll !== "function") {
+				continue;
+			}
+
+			root.querySelectorAll("video").forEach(video => {
+				if (!seen.has(video)) {
+					seen.add(video);
+					videos.push(video);
+				}
+			});
+
+			root.querySelectorAll("*").forEach(el => {
+				if (el.shadowRoot) {
+					roots.push(el.shadowRoot);
+				}
+			});
+		}
+
+		return videos;
+	}
+
+	function getCurrentAppliedVolumePercent() {
+		const video = getVideoElements()[0];
+		if (!video) {
+			return null;
+		}
+
+		const base = Math.max(0, Math.min(1, Number(video.volume) || 0)) * 100;
+		const nodes = videoAudioMap.get(video);
+		const gain = nodes && nodes.gainNode ? Number(nodes.gainNode.gain.value) || 1 : 1;
+		return Math.round(base * gain);
 	}
 
 	function setVideoVolume(video, volume) {
@@ -523,7 +560,10 @@
 
 		const targetVolume = getTargetVolume(roomId);
 		if (!force && lastAppliedRoomId === roomId && lastAppliedVolume === targetVolume) {
-			return true;
+			const currentVolume = getCurrentAppliedVolumePercent();
+			if (currentVolume !== null && Math.abs(currentVolume - targetVolume) <= 1) {
+				return true;
+			}
 		}
 
 		const applied = setPlayerVolume(targetVolume);
@@ -663,6 +703,7 @@
 				setPlayerVolume(roomVolume);
 				lastAppliedRoomId = currentRoomId;
 				lastAppliedVolume = roomVolume;
+				scheduleApply(true);
 				return;
 			}
 
@@ -690,6 +731,7 @@
 					setPlayerVolume(roomVolume);
 					lastAppliedRoomId = roomId;
 					lastAppliedVolume = clampVolume(roomVolume);
+					scheduleApply(true);
 				}
 				return;
 			}
@@ -888,6 +930,10 @@
 		scheduleApply(true);
 		ensureFloatingButton();
 
+		keepAliveTimer = setInterval(() => {
+			applyVolume(true);
+		}, 2500);
+
 		window.addEventListener("pointerdown", () => {
 			const ctx = getAudioContext();
 			if (ctx && ctx.state === "suspended") {
@@ -919,6 +965,10 @@
 
 		window.addEventListener("beforeunload", () => {
 			clearInterval(initialRetry);
+			if (keepAliveTimer) {
+				clearInterval(keepAliveTimer);
+				keepAliveTimer = null;
+			}
 			clearTimeout(applyTimer);
 		});
 	}
