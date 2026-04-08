@@ -19,9 +19,11 @@
 
 ## 点击安装
 
-[![Install from GitHub Raw](https://img.shields.io/badge/Install-GitHub%20Raw-00a1d6?style=for-the-badge)](https://raw.githubusercontent.com/chiriolanus/bilibili-auto-volume-/main/%E5%93%94%E5%93%A9%E5%93%94%E5%93%A9%E7%9B%B4%E6%92%AD%E9%97%B4%E9%9F%B3%E9%87%8F.user.js)
+[源码地址（GitHub）](https://github.com/chiriolanus/bilibili-auto-volume-/blob/main/哔哩哔哩直播间音量.user.js)
 
-[![Install from jsDelivr](https://img.shields.io/badge/Install-jsDelivr-f59e0b?style=for-the-badge)](https://cdn.jsdelivr.net/gh/chiriolanus/bilibili-auto-volume-@main/%E5%93%94%E5%93%A9%E5%93%94%E5%93%A9%E7%9B%B4%E6%92%AD%E9%97%B4%E9%9F%B3%E9%87%8F.user.js)
+[![Install from GitHub Raw](https://img.shields.io/badge/Install-GitHub%20Raw-00a1d6?style=for-the-badge)](https://raw.githubusercontent.com/chiriolanus/bilibili-auto-volume-/main/哔哩哔哩直播间音量.user.js)
+
+[![Install from jsDelivr](https://img.shields.io/badge/Install-jsDelivr-f59e0b?style=for-the-badge)](https://cdn.jsdelivr.net/gh/chiriolanus/bilibili-auto-volume-@main/哔哩哔哩直播间音量.user.js)
 
 如果第一个链接无法直接拉起安装，请使用 jsDelivr 按钮。
 
