@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         哔哩哔哩自动音量
 // @namespace    https://github.com/chiriolanus/bilibili-auto-volume-
-// @version      1.0.5
+// @version      1.0.6
 // @license      GPL-3.0
 // @description  为哔哩哔哩直播间按房间单独记忆音量，并在进入直播间时自动应用对应音量或默认音量。
 // @author       权哥本人（Chriolanus）
@@ -32,10 +32,8 @@
 	const state = loadState();
 	let settingsPanel = null;
 	let applyTimer = null;
-	let routeObserver = null;
 	let lastAppliedRoomId = null;
 	let lastAppliedVolume = null;
-	let keepAliveTimer = null;
 	let audioContext = null;
 	const videoAudioMap = new WeakMap();
 
@@ -431,53 +429,6 @@
 		return videos;
 	}
 
-	function getPlayerObjects() {
-		const seen = new Set();
-		const queue = [];
-		const players = [];
-
-		const seedCandidates = [
-			rootWindow.livePlayer,
-			rootWindow.livePlayer && rootWindow.livePlayer.player,
-			rootWindow.livePlayer && rootWindow.livePlayer.core,
-			rootWindow.player,
-			rootWindow.__NEPTUNE_IS_MY_WAIFU__
-		];
-
-		seedCandidates.filter(Boolean).forEach(item => queue.push(item));
-
-		while (queue.length > 0) {
-			const obj = queue.shift();
-			if (!obj || (typeof obj !== "object" && typeof obj !== "function")) {
-				continue;
-			}
-			if (seen.has(obj)) {
-				continue;
-			}
-			seen.add(obj);
-
-			const hasVolumeApi =
-				typeof obj.setVolume === "function" ||
-				typeof obj.setPlayerVolume === "function" ||
-				typeof obj.volume === "function";
-
-			if (hasVolumeApi) {
-				players.push(obj);
-			}
-
-			["player", "core", "media", "mediaPlayer", "controller", "engine", "instance"].forEach(key => {
-				try {
-					if (obj[key]) {
-						queue.push(obj[key]);
-					}
-				} catch (error) {
-					void error;
-				}
-			});
-		}
-
-		return players;
-	}
 
 	function getCurrentAppliedVolumePercent() {
 		const video = getVideoElements()[0];
@@ -560,91 +511,30 @@
 		nodes.gainNode.gain.value = Math.max(1, target / 100);
 	}
 
-	function detectPlayerVolumeScale(player) {
-		if (!player || typeof player.getVolume !== "function") {
-			return null;
-		}
-
-		try {
-			const value = Number(player.getVolume());
-			if (!Number.isFinite(value)) {
-				return null;
-			}
-			return value > 1 ? "0-100" : "0-1";
-		} catch (error) {
-			return null;
-		}
-	}
-
-	function setPlayerApiVolume(player, volumePercent) {
-		if (!player) {
+	function setLivePlayerVolumeDirect(volumePercent) {
+		const livePlayer = rootWindow.livePlayer;
+		if (!livePlayer || typeof livePlayer.volume !== "function") {
 			return false;
 		}
 
-		// 播放器 API 通常仅支持 0-100 或 0-1，超过 100 时先写入基础音量 100。
 		const basePercent = Math.min(100, clampVolume(volumePercent));
-		const normalized = basePercent / 100;
-		const scale = detectPlayerVolumeScale(player);
-		const candidates = scale === "0-100"
-			? [basePercent]
-			: scale === "0-1"
-				? [normalized]
-				: [basePercent, normalized];
-		const setters = ["setVolume", "setPlayerVolume", "volume"];
-		const getters = ["getVolume", "volume"];
-
-		function readCurrentPercent() {
-			for (const getterName of getters) {
-				const getter = player[getterName];
-				if (typeof getter !== "function") {
-					continue;
-				}
-				try {
-					const raw = Number(getter.call(player));
-					if (!Number.isFinite(raw)) {
-						continue;
-					}
-					return raw > 1 ? raw : raw * 100;
-				} catch (error) {
-					void error;
-				}
-			}
-			return null;
+		try {
+			// 该方法在当前直播播放器中实测接受 0-100，且返回 undefined。
+			livePlayer.volume(basePercent);
+			return true;
+		} catch (error) {
+			return false;
 		}
-
-		for (const setterName of setters) {
-			const setter = player[setterName];
-			if (typeof setter !== "function") {
-				continue;
-			}
-			for (const value of candidates) {
-				try {
-					setter.call(player, value);
-					const nowPercent = readCurrentPercent();
-					if (nowPercent === null || Math.abs(nowPercent - basePercent) <= 3) {
-						return true;
-					}
-				} catch (error) {
-					void error;
-				}
-			}
-		}
-
-		return false;
 	}
 
 	function setPlayerVolume(volume) {
 		const videos = getVideoElements();
 		let applied = false;
 
+		applied = setLivePlayerVolumeDirect(volume) || applied;
+
 		videos.forEach(video => {
 			applied = setVideoVolume(video, volume) || applied;
-		});
-
-		const candidatePlayers = getPlayerObjects();
-
-		candidatePlayers.forEach(player => {
-			applied = setPlayerApiVolume(player, volume) || applied;
 		});
 
 		if (videos.length === 0 && clampVolume(volume) > 100 && applied) {
@@ -663,6 +553,10 @@
 			if (currentVolume !== null && Math.abs(currentVolume - targetVolume) <= 1) {
 				return true;
 			}
+			// 当播放器不可读（例如仅支持写入 volume()）时，避免保活阶段反复重设。
+			if (currentVolume === null) {
+				return true;
+			}
 		}
 
 		const applied = setPlayerVolume(targetVolume);
@@ -674,14 +568,12 @@
 		return applied;
 	}
 
-	function scheduleApply(force = false) {
+	function scheduleApply(force = false, delayMs = 0) {
 		clearTimeout(applyTimer);
 		applyTimer = setTimeout(() => {
 			applyTimer = null;
-			if (!applyVolume(force)) {
-				scheduleApply(force);
-			}
-		}, 500);
+			applyVolume(force);
+		}, Math.max(0, delayMs));
 	}
 
 	function ensureBodyReady(callback) {
@@ -958,24 +850,10 @@
 		window.addEventListener("popstate", () => window.dispatchEvent(new Event("locationchange")));
 		window.addEventListener("hashchange", () => window.dispatchEvent(new Event("locationchange")));
 		window.addEventListener("locationchange", () => {
-			scheduleApply(true);
+			scheduleApply(true, 3000);
 			if (settingsPanel && settingsPanel.classList.contains("show")) {
 				updatePanel(settingsPanel);
 			}
-		});
-	}
-
-	function startObserver() {
-		if (routeObserver || !document.body) {
-			return;
-		}
-
-		routeObserver = new MutationObserver(() => {
-			scheduleApply(false);
-		});
-		routeObserver.observe(document.body, {
-			childList: true,
-			subtree: true
 		});
 	}
 
@@ -992,7 +870,14 @@
 			const videoCount = getVideoElements().length;
 			const appliedVolume = getCurrentAppliedVolumePercent();
 			const livePlayer = rootWindow.livePlayer;
-			const players = getPlayerObjects();
+			let livePlayerVolumeRead = null;
+			try {
+				if (livePlayer && typeof livePlayer.volume === "function") {
+					livePlayerVolumeRead = livePlayer.volume();
+				}
+			} catch (error) {
+				livePlayerVolumeRead = "throw";
+			}
 			console.log("[直播间音量][调试]", {
 				url: location.href,
 				roomId,
@@ -1001,9 +886,8 @@
 				appliedVolume,
 				hasLivePlayer: !!livePlayer,
 				hasPlayer: !!rootWindow.player,
-				livePlayerSetVolume: !!(livePlayer && typeof livePlayer.setVolume === "function"),
-				livePlayerGetVolume: !!(livePlayer && typeof livePlayer.getVolume === "function"),
-				candidatePlayerCount: players.length
+				livePlayerVolumeMethod: !!(livePlayer && typeof livePlayer.volume === "function"),
+				livePlayerVolumeRead
 			});
 		});
 	}
@@ -1042,13 +926,8 @@
 
 	function boot() {
 		installRouteHook();
-		startObserver();
-		scheduleApply(true);
+		scheduleApply(true, 3000);
 		ensureFloatingButton();
-
-		keepAliveTimer = setInterval(() => {
-			applyVolume(true);
-		}, 2500);
 
 		window.addEventListener("pointerdown", () => {
 			const ctx = getAudioContext();
@@ -1073,18 +952,7 @@
 			});
 		});
 
-		const initialRetry = setInterval(() => {
-			if (applyVolume(false)) {
-				clearInterval(initialRetry);
-			}
-		}, 1500);
-
 		window.addEventListener("beforeunload", () => {
-			clearInterval(initialRetry);
-			if (keepAliveTimer) {
-				clearInterval(keepAliveTimer);
-				keepAliveTimer = null;
-			}
 			clearTimeout(applyTimer);
 		});
 	}
