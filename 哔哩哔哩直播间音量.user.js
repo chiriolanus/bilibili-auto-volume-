@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         哔哩哔哩自动音量
 // @namespace    https://github.com/chiriolanus/bilibili-auto-volume-
-// @version      1.0.2
+// @version      1.0.5
 // @license      GPL-3.0
 // @description  为哔哩哔哩直播间按房间单独记忆音量，并在进入直播间时自动应用对应音量或默认音量。
 // @author       权哥本人（Chriolanus）
@@ -342,16 +342,32 @@
 			return pathnameMatch[1];
 		}
 
-		const searchRoomId = new URLSearchParams(location.search).get("room_id");
-		if (searchRoomId && /^\d+$/.test(searchRoomId)) {
-			return searchRoomId;
+		const pathFallbackMatch = location.pathname.match(/\/(?:blanc\/)?(\d{3,})(?:\b|\/|$)/);
+		if (pathFallbackMatch) {
+			return pathFallbackMatch[1];
+		}
+
+		const searchParams = new URLSearchParams(location.search);
+		const queryCandidates = [
+			searchParams.get("room_id"),
+			searchParams.get("roomid"),
+			searchParams.get("id")
+		];
+		for (const queryId of queryCandidates) {
+			if (queryId && /^\d+$/.test(queryId)) {
+				return queryId;
+			}
 		}
 
 		const waifu = rootWindow.__NEPTUNE_IS_MY_WAIFU__;
+		const initialState = rootWindow.__INITIAL_STATE__;
 		const candidates = [
 			waifu && waifu.roomInitRes && waifu.roomInitRes.data && waifu.roomInitRes.data.room_id,
+			waifu && waifu.roomInitRes && waifu.roomInitRes.data && waifu.roomInitRes.data.roomid,
 			waifu && waifu.roomInfo && waifu.roomInfo.room_id,
 			waifu && waifu.room_id,
+			initialState && initialState.roomInitRes && initialState.roomInitRes.data && initialState.roomInitRes.data.room_id,
+			initialState && initialState.roomInfoRes && initialState.roomInfoRes.data && initialState.roomInfoRes.data.room_info && initialState.roomInfoRes.data.room_info.room_id,
 			rootWindow.__room_id,
 			rootWindow.room_id
 		];
@@ -399,9 +415,68 @@
 					roots.push(el.shadowRoot);
 				}
 			});
+
+			root.querySelectorAll("iframe").forEach(frame => {
+				try {
+					const frameDoc = frame.contentDocument;
+					if (frameDoc) {
+						roots.push(frameDoc);
+					}
+				} catch (error) {
+					void error;
+				}
+			});
 		}
 
 		return videos;
+	}
+
+	function getPlayerObjects() {
+		const seen = new Set();
+		const queue = [];
+		const players = [];
+
+		const seedCandidates = [
+			rootWindow.livePlayer,
+			rootWindow.livePlayer && rootWindow.livePlayer.player,
+			rootWindow.livePlayer && rootWindow.livePlayer.core,
+			rootWindow.player,
+			rootWindow.__NEPTUNE_IS_MY_WAIFU__
+		];
+
+		seedCandidates.filter(Boolean).forEach(item => queue.push(item));
+
+		while (queue.length > 0) {
+			const obj = queue.shift();
+			if (!obj || (typeof obj !== "object" && typeof obj !== "function")) {
+				continue;
+			}
+			if (seen.has(obj)) {
+				continue;
+			}
+			seen.add(obj);
+
+			const hasVolumeApi =
+				typeof obj.setVolume === "function" ||
+				typeof obj.setPlayerVolume === "function" ||
+				typeof obj.volume === "function";
+
+			if (hasVolumeApi) {
+				players.push(obj);
+			}
+
+			["player", "core", "media", "mediaPlayer", "controller", "engine", "instance"].forEach(key => {
+				try {
+					if (obj[key]) {
+						queue.push(obj[key]);
+					}
+				} catch (error) {
+					void error;
+				}
+			});
+		}
+
+		return players;
 	}
 
 	function getCurrentAppliedVolumePercent() {
@@ -502,28 +577,56 @@
 	}
 
 	function setPlayerApiVolume(player, volumePercent) {
-		if (!player || typeof player.setVolume !== "function") {
+		if (!player) {
 			return false;
 		}
 
-		if (clampVolume(volumePercent) > 100) {
-			return false;
-		}
-
-		const normalized = clampVolume(volumePercent) / 100;
+		// 播放器 API 通常仅支持 0-100 或 0-1，超过 100 时先写入基础音量 100。
+		const basePercent = Math.min(100, clampVolume(volumePercent));
+		const normalized = basePercent / 100;
 		const scale = detectPlayerVolumeScale(player);
-		if (!scale) {
-			return false;
+		const candidates = scale === "0-100"
+			? [basePercent]
+			: scale === "0-1"
+				? [normalized]
+				: [basePercent, normalized];
+		const setters = ["setVolume", "setPlayerVolume", "volume"];
+		const getters = ["getVolume", "volume"];
+
+		function readCurrentPercent() {
+			for (const getterName of getters) {
+				const getter = player[getterName];
+				if (typeof getter !== "function") {
+					continue;
+				}
+				try {
+					const raw = Number(getter.call(player));
+					if (!Number.isFinite(raw)) {
+						continue;
+					}
+					return raw > 1 ? raw : raw * 100;
+				} catch (error) {
+					void error;
+				}
+			}
+			return null;
 		}
 
-		const candidates = scale === "0-100" ? [clampVolume(volumePercent)] : [normalized];
-
-		for (const value of candidates) {
-			try {
-				player.setVolume(value);
-				return true;
-			} catch (error) {
-				void error;
+		for (const setterName of setters) {
+			const setter = player[setterName];
+			if (typeof setter !== "function") {
+				continue;
+			}
+			for (const value of candidates) {
+				try {
+					setter.call(player, value);
+					const nowPercent = readCurrentPercent();
+					if (nowPercent === null || Math.abs(nowPercent - basePercent) <= 3) {
+						return true;
+					}
+				} catch (error) {
+					void error;
+				}
 			}
 		}
 
@@ -538,28 +641,24 @@
 			applied = setVideoVolume(video, volume) || applied;
 		});
 
-		const livePlayer = rootWindow.livePlayer;
-		const candidatePlayers = [
-			livePlayer,
-			livePlayer && livePlayer.player,
-			rootWindow.player
-		].filter(Boolean);
+		const candidatePlayers = getPlayerObjects();
 
 		candidatePlayers.forEach(player => {
 			applied = setPlayerApiVolume(player, volume) || applied;
 		});
+
+		if (videos.length === 0 && clampVolume(volume) > 100 && applied) {
+			console.log("[直播间音量] 未检测到 video 元素，已回退为播放器基础音量 100%（增强部分需 video 节点可用后生效）");
+		}
 
 		return applied || videos.length > 0;
 	}
 
 	function applyVolume(force = false) {
 		const roomId = getCurrentRoomId();
-		if (!roomId) {
-			return false;
-		}
-
-		const targetVolume = getTargetVolume(roomId);
-		if (!force && lastAppliedRoomId === roomId && lastAppliedVolume === targetVolume) {
+		const roomKey = roomId || "__default__";
+		const targetVolume = roomId ? getTargetVolume(roomId) : clampVolume(state.defaultVolume);
+		if (!force && lastAppliedRoomId === roomKey && lastAppliedVolume === targetVolume) {
 			const currentVolume = getCurrentAppliedVolumePercent();
 			if (currentVolume !== null && Math.abs(currentVolume - targetVolume) <= 1) {
 				return true;
@@ -568,9 +667,9 @@
 
 		const applied = setPlayerVolume(targetVolume);
 		if (applied) {
-			lastAppliedRoomId = roomId;
+			lastAppliedRoomId = roomKey;
 			lastAppliedVolume = targetVolume;
-			console.log(`[直播间音量] 已应用房间 ${roomId} 的音量: ${targetVolume}%`);
+			console.log(`[直播间音量] 已应用${roomId ? `房间 ${roomId}` : "默认"}音量: ${targetVolume}%`);
 		}
 		return applied;
 	}
@@ -696,12 +795,9 @@
 			}
 
 			if (target.id === "apply-room-volume") {
-				if (!currentRoomId) {
-					return;
-				}
 				const roomVolume = getPanelVolume(panel, "room");
 				setPlayerVolume(roomVolume);
-				lastAppliedRoomId = currentRoomId;
+				lastAppliedRoomId = currentRoomId || "__default__";
 				lastAppliedVolume = roomVolume;
 				scheduleApply(true);
 				return;
@@ -890,6 +986,26 @@
 
 		GM_registerMenuCommand("直播间音量设置", () => togglePanel(true));
 		GM_registerMenuCommand("刷新当前直播间音量", () => scheduleApply(true));
+		GM_registerMenuCommand("输出调试信息", () => {
+			const roomId = getCurrentRoomId();
+			const targetVolume = roomId ? getTargetVolume(roomId) : clampVolume(state.defaultVolume);
+			const videoCount = getVideoElements().length;
+			const appliedVolume = getCurrentAppliedVolumePercent();
+			const livePlayer = rootWindow.livePlayer;
+			const players = getPlayerObjects();
+			console.log("[直播间音量][调试]", {
+				url: location.href,
+				roomId,
+				targetVolume,
+				videoCount,
+				appliedVolume,
+				hasLivePlayer: !!livePlayer,
+				hasPlayer: !!rootWindow.player,
+				livePlayerSetVolume: !!(livePlayer && typeof livePlayer.setVolume === "function"),
+				livePlayerGetVolume: !!(livePlayer && typeof livePlayer.getVolume === "function"),
+				candidatePlayerCount: players.length
+			});
+		});
 	}
 
 	function ensureFloatingButton() {
